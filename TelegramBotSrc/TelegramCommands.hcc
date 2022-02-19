@@ -1,0 +1,290 @@
+#pragma once
+
+#include <Arduino.h>
+#include <HTTPClient32.h>
+#include "TelegramClient.h"
+#include <ArduinoJson.h>
+
+class TelegramUpdate;
+
+class TelegramCommand {
+    public:
+        TelegramCommand(TelegramBot* bot) {
+            this->bot = bot;
+        }
+
+        virtual ~TelegramCommand() {
+            if (this->client) {
+                delete client;
+            }
+            freeResponse();
+        }
+
+        void freeResponse() {
+            if (json) {
+                delete json;
+                json = NULL;
+            }
+        }
+
+        //@implement
+        //@include <ArduinoJson.h>
+        virtual bool getResponse() {
+            freeResponse();
+            result = bot->getResult(client);
+            DEBUG("telegram: ");
+            DEBUGLN(result);
+
+            DynamicJsonDocument* doc = new DynamicJsonDocument(2048);
+            DeserializationError error = deserializeJson(*doc, result.c_str());
+
+            if (!error && doc->containsKey(F("ok")) && doc->containsKey(F("result"))) {
+                json = doc;
+
+                return json->getMember(F("ok")).as<bool>();
+            }
+
+            return false;
+        }
+
+        JsonVariant getResult() {
+            if (!json) {
+                return JsonVariant();
+            }
+            json->getMember(F("result"));
+            return json->getMember(F("result"));
+        }
+
+        JsonArray getResultArr() {
+            JsonVariant result = this->getResult();
+            if (result.is<JsonArray>()) {
+                return result.as<JsonArray>();
+            }
+            return JsonArray();
+        }
+
+        JsonObject getResultObject() {
+            JsonVariant result = this->getResult();
+            if (result.is<JsonObject>()) {
+                return result.as<JsonObject>();
+            }
+            return JsonObject();
+        }
+
+        //@implement
+        String getRawResult() {
+            return this->result;
+        }
+
+    protected:
+        TelegramBot*    bot;
+        HTTPClient32*   client = NULL;
+        String          result;
+        DynamicJsonDocument* json = NULL;
+
+        void init(HTTPClient32::METHOD_TYPE method, String command) {
+            client = bot->createClient(method, command);
+        }
+};
+
+
+class TelegramGetUpdates: protected TelegramCommand {
+    protected:
+        HTTPClient32PostMultipartBody*  body = NULL;
+        HTTPClient32MultipartString*    offsetValue = NULL;
+        HTTPClient32MultipartString*    limitValue = NULL;
+        HTTPClient32MultipartString*    allowedValue = NULL;
+        uint16_t                        updates = 0;
+
+    public:
+        TelegramGetUpdates(TelegramBot* bot): TelegramCommand(bot) {
+            this->init(HTTP_METHOD_POST, F("getUpdates"));
+            body = client->setPostMultipartBody();
+            setAllowedUpdates(F("[\"message\",\"channel_post\"]"));
+        }
+
+        //@implement
+        TelegramGetUpdates* setOffset(String offset) {
+            if (!offsetValue) {
+                offsetValue = body->addContentString(F("offset"), offset);
+            } else {
+                offsetValue->setValue(offset);
+            }
+            freeResponse();
+            return this;
+        }
+
+        //@implement
+        TelegramGetUpdates* setLimit(uint16_t msg_limit) {
+            if (!offsetValue) {
+                limitValue = body->addContentString(F("msg_limit"), String(msg_limit));
+            } else {
+                limitValue->setValue(String(msg_limit));
+            }
+            freeResponse();
+            return this;
+        }
+
+        //@implement
+        TelegramGetUpdates* setAllowedUpdates(String allowed_updates_json) {
+            if (!offsetValue) {
+                allowedValue = body->addContentString(F("allowed_updates"), String(allowed_updates_json));
+            } else {
+                allowedValue->setValue(String(allowed_updates_json));
+            }
+            freeResponse();
+            return this;
+        }
+
+        //@implement
+        virtual bool getResponse() {
+            freeResponse(); updates = 0;
+            if (TelegramCommand::getResponse() && getResultArr().size() > 0) {
+                updates = getResultArr().size();
+                return true;
+            }
+            return false;
+        }
+
+        //@implement
+        //@include <TelegramStructs.h>
+        TelegramUpdate* getUpdate(uint16_t num) {
+            if (updates == 0 || num >= updates) {
+                if (!this->getResponse()) {
+                    return NULL;
+                }
+            }
+            JsonObject updateRec = getResultArr()[num];
+            if (!updateRec.containsKey(F("update_id"))) {
+                return NULL;
+            }
+            return TelegramUpdate::create(updateRec.getMember(F("update_id")).as<unsigned int>(), updateRec);
+        }
+
+        uint16_t getUpdates() {
+            return updates;
+        }
+};
+
+class TelegramSendMessage: public TelegramCommand {
+    protected:
+        HTTPClient32PostMultipartBody*  body;
+        HTTPClient32MultipartString*    textValue = NULL;
+        HTTPClient32MultipartString*    chatIdValue = NULL;
+        HTTPClient32MultipartString*    replyMarkupValue = NULL;
+        HTTPClient32MultipartString*    parseValue = NULL;
+
+    public:
+        //@implement
+        TelegramSendMessage(TelegramBot* bot): TelegramCommand(bot) {
+            this->init(HTTP_METHOD_POST, F("sendMessage"));
+            body = client->setPostMultipartBody();
+        }
+
+        //@implement
+        TelegramSendMessage* setText(String text) {
+            if (!textValue) {
+                textValue = body->addContentString(F("text"), text);
+            } else {
+                textValue->setValue(text);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendMessage* setChatId(String chat_id) {
+            if (!chatIdValue) {
+                chatIdValue = body->addContentString(F("chat_id"), chat_id);
+            } else {
+                chatIdValue->setValue(chat_id);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendMessage* setParseMode(String parse_mode) {
+            if (!parseValue) {
+                parseValue = body->addContentString(F("parse_mode"), parse_mode);
+            } else {
+                parseValue->setValue(parse_mode);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendMessage* setReplyMarkup(String reply_markup) {
+            if (!replyMarkupValue) {
+                replyMarkupValue = body->addContentString(F("reply_markup"), reply_markup);
+            } else {
+                replyMarkupValue->setValue(reply_markup);
+            }
+            return this;
+        }
+};
+
+class TelegramSendPhoto: public TelegramCommand {
+    protected:
+        HTTPClient32PostMultipartBody*  body;
+        HTTPClient32MultipartString*    textValue = NULL;
+        HTTPClient32MultipartString*    chatIdValue = NULL;
+        HTTPClient32MultipartString*    replyMarkupValue = NULL;
+        HTTPClient32MultipartString*    parseValue = NULL;
+        HTTPClient32MultipartFileFS*    fileValue = NULL;
+
+    public:
+        //@implement
+        TelegramSendPhoto(TelegramBot* bot): TelegramCommand(bot) {
+            this->init(HTTP_METHOD_POST, F("sendPhoto"));
+            body = client->setPostMultipartBody();
+        }
+
+        //@implement
+        TelegramSendPhoto* setText(String text) {
+            if (!textValue) {
+                textValue = body->addContentString(F("caption"), text);
+            } else {
+                textValue->setValue(text);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendPhoto* setChatId(String chat_id) {
+            if (!chatIdValue) {
+                chatIdValue = body->addContentString(F("chat_id"), chat_id);
+            } else {
+                chatIdValue->setValue(chat_id);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendPhoto* setParseMode(String parse_mode) {
+            if (!parseValue) {
+                parseValue = body->addContentString(F("parse_mode"), parse_mode);
+            } else {
+                parseValue->setValue(parse_mode);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendPhoto* setReplyMarkup(String reply_markup) {
+            if (!replyMarkupValue) {
+                replyMarkupValue = body->addContentString(F("reply_markup"), reply_markup);
+            } else {
+                replyMarkupValue->setValue(reply_markup);
+            }
+            return this;
+        }
+
+        //@implement
+        TelegramSendPhoto* setPhoto(String filename, String contentType, File &file) {
+            if (!fileValue) {
+                fileValue = body->addContentFileFS(F("photo"), filename, contentType, file);
+            } else {
+                fileValue->setValue(filename, contentType, file);
+            }
+            return this;
+        }
+};
